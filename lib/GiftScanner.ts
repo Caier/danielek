@@ -1,23 +1,34 @@
-import { Client, TextChannel, Message, RichEmbed } from "discord.js";
+import { Client, TextChannel, Message, RichEmbed, Guild } from "discord.js";
 import https from 'https';
+import crypto from 'crypto';
 
-interface GifterInfo {
-    id: string
-    username: string
-    avatar: string
-    discriminator: string
+interface GiftInfo {
+    user: {
+        id: string
+        username: string
+        avatar: string
+        discriminator: string
+    }
+    store_listing: {
+        sku: {
+            name: string
+        }
+    }
 }
 
-export default class extends Client {
+export default class Scanner extends Client {
+    public readonly id = crypto.randomBytes(16).toString("hex");
     private readonly logId: string;
     private readonly logGuildId: string;
     private readonly redeemToken: string;
+    private ignoreClassic: boolean;
+    private scanners: Scanner[];
     private logChannel: TextChannel;
     private sharedUsedList: string[];
     private lastMessage: Message;
     private readonly giftRegex = /discord\.gift\/([\d\w]{1,19})(?: |$)/im;
 
-    constructor(token: string, rToken: string, logId: string, logGuildId: string, uList: string[]) {
+    constructor(token: string, rToken: string, logId: string, logGuildId: string, ignore: number, uList: string[], scanners: Scanner[]) {
         super();
         ///@ts-ignore
         const orgF = this.dataManager.newChannel;
@@ -27,7 +38,9 @@ export default class extends Client {
         this.redeemToken = rToken;
         this.logId = logId;
         this.logGuildId = logGuildId;
+        this.ignoreClassic = Boolean(ignore);
         this.sharedUsedList = uList;
+        this.scanners = scanners;
         this.start();
     }
 
@@ -35,12 +48,29 @@ export default class extends Client {
         super.login(this.token);
         this.on('ready', () => this.onReady());
         this.on('message', msg => this.onMessage(msg));
+        this.on('guildCreate', g => this.checkDupeGuild(g));
     }
 
     private onReady() {
         console.log(`Zalogowano jako ${this.user.tag}`);
         this.logChannel = this.channels.get(this.logId) as TextChannel;
+        this.logChannel.send(new RichEmbed().setColor('#1ece00').setDescription(`Zalogowano`));
     }
+
+    public async getGuilds() {
+        while(!this.readyAt)
+            await new Promise(r => setTimeout(r, 100));
+            
+        return this.guilds.array();
+    }
+
+    private async checkDupeGuild(guild: Guild) {
+        for(let s of this.scanners.filter(s => s.id != this.id))
+            if((await s.getGuilds()).map(g => g.id).includes(guild.id)) {
+                this.logChannel.send(new RichEmbed().setColor('#e30207').setDescription(`Na serwerze **${guild.name}** znajdują się już inni szpiedzy.\nOpuściłxm ten serwer.`));
+                guild.leave();
+            }
+    } 
 
     private async onMessage(msg: Message) {
         if(msg.guild?.id == this.logGuildId) {
@@ -89,10 +119,21 @@ export default class extends Client {
         else if(msg.content.startsWith('...ping')) {
             msg.channel.send(new RichEmbed().setColor('#1ece00').setDescription(`**${msg.author.tag}** :ping_pong: ${this.ping}ms`));
         }
+        else if(msg.content.startsWith('...ignore')) {
+            msg.channel.send(new RichEmbed().setColor('#9676ef').setDescription(`Ignorowanie Nitro Classic (i śmieci) jest **${this.ignoreClassic ? 'włączone' : 'wyłączone'}**`));
+        }
     }
 
     private async redeemCode(code: string) {
         try {
+            if(this.ignoreClassic) {
+                let info = (await this.getGiftCreatorInfo(code))?.store_listing?.sku?.name;
+                if(!info || info == "Nitro Classic") {
+                    this.logChannel.send(new RichEmbed().setColor('#9676ef').setDescription(`**Zignorowano ${info ? "Nitro Classic" : "śmiecia"}.**\n${code}`));
+                    return;
+                }
+            }
+
             let rq = https.request({
                 hostname: 'discordapp.com',
                 port: 443,
@@ -109,7 +150,7 @@ export default class extends Client {
                     this.logChannel.send(`kod: **${code}**`);
                     let gift = JSON.parse(body);
                     if(gift.code == 50050) {
-                        let gifter = await this.getGiftCreatorInfo(code);
+                        let gifter = (await this.getGiftCreatorInfo(code)).user;
                         this.logChannel.send(`gifter: **@${gifter.username}#${gifter.discriminator}**`);
                     }
                     this.logChannel.send("Wynik próby odebrania prezentu:\n\n" + JSON.stringify(gift, null, 2), {code: 'json', split: true});
@@ -130,13 +171,13 @@ export default class extends Client {
         }
     }
 
-    private getGiftCreatorInfo(code: string): Promise<GifterInfo> {
+    private getGiftCreatorInfo(code: string): Promise<GiftInfo> {
         return new Promise(res => {
             https.get(`https://discordapp.com/api/v6/entitlements/gift-codes/${code}`, resp => {
                 let body = '';
                 resp.on('data', d => body += d);
                 resp.on('end', () => {
-                    res(JSON.parse(body).user);
+                    res(JSON.parse(body));
                 });
             });
         });
